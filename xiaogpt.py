@@ -26,6 +26,7 @@ HARDWARE_COMMAND_DICT = {
     "LX01": "5-1",
     "L06A": "5-1",
     "LX04": "5-1",
+    "L05C": "5-3",
     # add more here
 }
 MI_USER = ""
@@ -33,6 +34,9 @@ MI_PASS = ""
 OPENAI_API_KEY = ""
 KEY_WORD = "帮我"
 PROMPT = "请用100字以内回答"
+
+# simulate the response from xiaoai server by type the input.
+CLI_INTERACTIVE_MODE = False
 
 
 ### HELP FUNCTION ###
@@ -76,19 +80,17 @@ class GPT3Bot:
 
 class ChatGPTBot:
     def __init__(self, session):
-        pass
+        self.session = session
+        self.history = []
 
     async def ask(self, query):
         openai.api_key = OPENAI_API_KEY
-        completion = openai.ChatCompletion.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"{query}",
-                }
-            ],
-        )
+        ms = []
+        for h in self.history:
+            ms.append({"role": "user", "content": h[0]})
+            ms.append({"role": "assistant", "content": h[1]})
+        ms.append({"role": "user", "content": f"{query}"})
+        completion = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=ms)
         message = (
             completion["choices"][0]
             .get("message")
@@ -96,6 +98,9 @@ class ChatGPTBot:
             .encode("utf8")
             .decode()
         )
+        self.history.append([f"{query}", message])
+        # only keep 5 history
+        self.history = self.history[-5:]
         return message
 
 
@@ -191,7 +196,30 @@ class MiGPT:
         else:
             self.chatbot = Chatbot(configure())
 
+    async def simulate_xiaoai_question(self):
+        data = {
+            "code": 0,
+            "message": "Success",
+            "data": '{"bitSet":[0,1,1],"records":[{"bitSet":[0,1,1,1,1],"answers":[{"bitSet":[0,1,1,1],"type":"TTS","tts":{"bitSet":[0,1],"text":"Fake Answer"}}],"time":1677851434593,"query":"Fake Question","requestId":"fada34f8fa0c3f408ee6761ec7391d85"}],"nextEndTime":1677849207387}',
+        }
+        # Convert the data['data'] value from a string to a dictionary
+        data_dict = json.loads(data["data"])
+        # Get the first item in the records list
+        record = data_dict["records"][0]
+        # Replace the query and time values with user input
+        record["query"] = input("Enter the new query: ")
+        record["time"] = int(time.time() * 1000)
+        # Convert the updated data_dict back to a string and update the data['data'] value
+        data["data"] = json.dumps(data_dict)
+        await asyncio.sleep(1)
+
+        return data
+
     async def get_latest_ask_from_xiaoai(self):
+        if CLI_INTERACTIVE_MODE:
+            r = await self.simulate_xiaoai_question()
+            return r
+
         r = await self.session.get(
             LATEST_ASK_API.format(
                 hardware=self.hardware, timestamp=str(int(time.time() * 1000))
@@ -210,6 +238,11 @@ class MiGPT:
             return timestamp, last_record
 
     async def do_tts(self, value):
+        if CLI_INTERACTIVE_MODE:
+            print(f"do_tts, CLI_INTERACTIVE_MODE:{value}")
+            await asyncio.sleep(2)
+            return
+
         if not self.use_command:
             try:
                 await self.mina_service.text_to_speech(self.device_id, value)
@@ -220,7 +253,7 @@ class MiGPT:
             subprocess.check_output(["micli", self.tts_command, value])
 
     def _normalize(self, message):
-        message = message.replace(" ", "，")
+        message = message.replace(" ", "--")
         message = message.replace("\n", "，")
         message = message.replace('"', "，")
         return message
@@ -302,13 +335,15 @@ class MiGPT:
                     await asyncio.sleep(3)
                 else:
                     await asyncio.sleep(0.3)
-                if self.this_mute_xiaoai:
-                    await self.stop_if_xiaoai_is_playing()
+
                 new_timestamp, last_record = self.get_last_timestamp_and_record(r)
                 if new_timestamp > self.last_timestamp:
                     self.last_timestamp = new_timestamp
                     query = last_record.get("query", "")
                     if query.find(KEY_WORD) != -1:
+                        # only mute when your clause start's with the keyword
+                        if self.this_mute_xiaoai:
+                            await self.stop_if_xiaoai_is_playing()
                         self.this_mute_xiaoai = False
                         # drop 帮我回答
                         query = query.replace(KEY_WORD, "")
@@ -413,26 +448,24 @@ if __name__ == "__main__":
         "--config",
         dest="config",
         type=str,
-        default="xiaogptconfig.json",
+        default="",
         help="config file path",
     )
 
     options = parser.parse_args()
 
-    # init the --config xiaogptconfig.json.example
-    config = {}
     if options.config:
+        config = {}
         if os.path.exists(options.config):
             with open(options.config, "r") as f:
                 config = json.load(f)
         else:
             raise Exception(f"{options.config} doesn't exist")
 
-
-    # update options with config
-    for key, value in config.items():
-        if not getattr(options, key, None):
-            setattr(options, key, value)
+        # update options with config
+        for key, value in config.items():
+            if not getattr(options, key, None):
+                setattr(options, key, value)
 
     # if set
     MI_USER = options.account or env.get("MI_USER") or MI_USER
